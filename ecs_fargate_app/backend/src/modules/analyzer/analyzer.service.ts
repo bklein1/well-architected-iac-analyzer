@@ -1,14 +1,15 @@
-import { Injectable, Logger } from '@nestjs/common';
-import { AwsConfigService } from '../../config/aws.config';
-import { InvokeModelCommand } from '@aws-sdk/client-bedrock-runtime';
-import { RetrieveCommand } from '@aws-sdk/client-bedrock-agent-runtime';
-import { GetObjectCommand } from '@aws-sdk/client-s3';
-import { paginateListAnswers, AnswerSummary } from '@aws-sdk/client-wellarchitected';
-import { ConfigService } from '@nestjs/config';
-import { AnalyzerGateway } from './analyzer.gateway';
-import { IaCTemplateType } from '../../shared/dto/analysis.dto';
-import { Subject } from 'rxjs';
-import { AnalysisResult } from '../../shared/interfaces/analysis.interface';
+import {Injectable, Logger} from '@nestjs/common';
+import {StorageService} from '../../shared/services/storage.service';
+import {AwsConfigService} from '../../config/aws.config';
+import {InvokeModelCommand} from '@aws-sdk/client-bedrock-runtime';
+import {RetrieveCommand} from '@aws-sdk/client-bedrock-agent-runtime';
+import {GetObjectCommand} from '@aws-sdk/client-s3';
+import {paginateListAnswers, AnswerSummary} from '@aws-sdk/client-wellarchitected';
+import {ConfigService} from '@nestjs/config';
+import {AnalyzerGateway} from './analyzer.gateway';
+import {IaCTemplateType} from '../../shared/dto/analysis.dto';
+import {Subject} from 'rxjs';
+import {AnalysisResult} from '../../shared/interfaces/analysis.interface';
 
 interface QuestionGroup {
     pillar: string;
@@ -67,7 +68,9 @@ export class AnalyzerService {
         private readonly awsConfig: AwsConfigService,
         private readonly configService: ConfigService,
         private readonly analyzerGateway: AnalyzerGateway,
-    ) { }
+        private readonly storageService: StorageService,
+    ) {
+    }
 
     private isImageFile(fileType: string | undefined): boolean {
         if (!fileType) return false;
@@ -78,7 +81,13 @@ export class AnalyzerService {
         this.cancelAnalysis$.next();
     }
 
-    async analyze(fileContent: string, workloadId: string, selectedPillars: string[], fileType: string): Promise<{ results: AnalysisResult[]; isCancelled: boolean; error?: string  }> {
+    async analyze(fileContent: string, fileName: string, workloadId: string, selectedPillars: string[], fileType: string): Promise<{
+        results: AnalysisResult[];
+        isCancelled: boolean;
+        error?: string;
+        fileId: string
+    }> {
+        const fileId = await this.storageService.uploadFile(fileContent, fileName);
         const results: AnalysisResult[] = [];
         try {
             // Load all best practices once
@@ -125,7 +134,7 @@ export class AnalyzerService {
                                 currentPillar: pillar,
                                 currentQuestion: 'Analysis cancelled',
                             });
-                            return { results, isCancelled: true };
+                            return {results, isCancelled: true, fileId: fileId};
                         }
 
                         let kbContexts: string[];
@@ -136,10 +145,11 @@ export class AnalyzerService {
                             );
                         } catch (error) {
                             this.logger.error(`Error retrieving from knowledge base: ${error}`);
-                            return { 
-                                results, 
-                                isCancelled: false, 
-                                error: `Error retrieving from knowledge base. Analysis stopped. ${error}` 
+                            return {
+                                results,
+                                isCancelled: false,
+                                error: `Error retrieving from knowledge base. Analysis stopped. ${error}`,
+                                fileId: fileId
                             };
                         }
 
@@ -162,10 +172,11 @@ export class AnalyzerService {
                         } catch (error) {
                             this.logger.error(`Error analyzing question "${question.pillar} - ${question.title}". Error: ${error}`);
                             // Return partial results with error
-                            return { 
-                                results, 
-                                isCancelled: false, 
-                                error: `${error}. Error analyzing question "${question.pillar} - ${question.title}". Analysis stopped, ${processedQuestions} questions where analyzed out of ${totalQuestions}.` 
+                            return {
+                                results,
+                                isCancelled: false,
+                                error: `${error}. Error analyzing question "${question.pillar} - ${question.title}". Analysis stopped, ${processedQuestions} questions where analyzed out of ${totalQuestions}.`,
+                                fileId: fileId
                             };
                         }
 
@@ -181,23 +192,25 @@ export class AnalyzerService {
                     } catch (error) {
                         this.logger.error(`Error processing question: ${error}`);
                         // Return partial results with error
-                        return { 
-                            results, 
-                            isCancelled: false, 
-                            error: 'Error processing question. Analysis stopped.' 
+                        return {
+                            results,
+                            isCancelled: false,
+                            error: 'Error processing question. Analysis stopped.',
+                            fileId: fileId
                         };
                     }
                 }
             }
 
-            return { results, isCancelled: false };
+            return {results, isCancelled: false, fileId: fileId};
         } catch (error) {
             this.logger.error('Analysis failed:', error);
             // Return partial results with error
-            return { 
-                results, 
-                isCancelled: false, 
-                error: `Showing partial results. Analysis failed with error: ${error}` 
+            return {
+                results,
+                isCancelled: false,
+                error: `Showing partial results. Analysis failed with error: ${error}`,
+                fileId: fileId
             };
         }
     }
@@ -207,12 +220,13 @@ export class AnalyzerService {
     }
 
     async generateIacDocument(
-        fileContent: string,
+        fileId: string,
         fileName: string,
         fileType: string,
         recommendations: any[],
         templateType?: IaCTemplateType
     ): Promise<{ content: string; isCancelled: boolean; error?: string }> {
+        const fileContent = await this.storageService.getFileContent(fileId);
         try {
             // Only proceed if it's an image file
             if (!this.isImageFile(fileType)) {
@@ -259,7 +273,10 @@ export class AnalyzerService {
                         };
                     }
 
-                    const { isComplete: batchComplete, sections } = this.parseImplementationModelResponse(response.content);
+                    const {
+                        isComplete: batchComplete,
+                        sections
+                    } = this.parseImplementationModelResponse(response.content);
 
                     allSections.push(...sections);
                     isComplete = batchComplete;
@@ -274,7 +291,7 @@ export class AnalyzerService {
                         const content = sortedSections.map(section =>
                             `# ${section.description}\n${section.content}`
                         ).join('\n\n');
-    
+
                         return {
                             content: errorNote + content,
                             isCancelled: false,
@@ -416,7 +433,7 @@ export class AnalyzerService {
                                 this.buildDetailsSystemPrompt()
                             );
 
-                        const { content, isComplete: sectionComplete } =
+                        const {content, isComplete: sectionComplete} =
                             this.parseDetailsModelResponse(response.content[0].text);
 
                         itemDetails += content;
@@ -458,7 +475,7 @@ export class AnalyzerService {
                 throw new Error('Failed to generate any detailed analysis');
             }
 
-            return { content: allDetails.trim() };
+            return {content: allDetails.trim()};
         } catch (error) {
             this.logger.error('Error getting more details:', error);
             if (error instanceof Error) {
@@ -876,7 +893,7 @@ export class AnalyzerService {
             messages: [
                 {
                     role: "user",
-                    content: [{ type: "text", text: prompt }],
+                    content: [{type: "text", text: prompt}],
                 },
             ],
         };
@@ -917,7 +934,7 @@ export class AnalyzerService {
             messages: [
                 {
                     role: "user",
-                    content: [{ type: "text", text: prompt }],
+                    content: [{type: "text", text: prompt}],
                 },
             ],
         };
@@ -1074,7 +1091,7 @@ export class AnalyzerService {
             };
 
             const paginator = paginateListAnswers(
-                { client: waClient },
+                {client: waClient},
                 {
                     WorkloadId: workloadId,
                     LensAlias: 'wellarchitected'
@@ -1153,7 +1170,7 @@ export class AnalyzerService {
             this.cachedBestPractices = baseBestPractices.map(bp => {
                 // Create the same unique key for lookup
                 const uniqueKey = `${bp.Question}|||${bp['Best Practice']}`;
-                
+
                 return {
                     ...bp,
                     bestPracticeId: choiceIdMapping.get(uniqueKey) ||

@@ -4,22 +4,76 @@ import {
   Body,
   HttpException,
   HttpStatus,
-  Logger
+  Logger,
+  UseInterceptors,
+  UploadedFile, BadRequestException
 } from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
+import { diskStorage } from 'multer';
+import { v4 as uuidv4 } from 'uuid';
+import * as path from 'path';
+import { FileUploadResponseDto } from '../../shared/dto/file-upload.dto';
 import { AnalyzerService } from './analyzer.service';
+import * as fs from 'fs';
 import { AnalyzeRequestDto, IaCTemplateType } from '../../shared/dto/analysis.dto';
 
 @Controller('analyzer')
 export class AnalyzerController {
   private readonly logger = new Logger(AnalyzerController.name);
+  private readonly uploadDir = 'temp-uploads';
 
-  constructor(private readonly analyzerService: AnalyzerService) { }
+  constructor(private readonly analyzerService: AnalyzerService) {
+    // Ensure upload directory exists
+    if (!fs.existsSync(this.uploadDir)) {
+      fs.mkdirSync(this.uploadDir, { recursive: true });
+    }
+  }
+
+  @Post('upload')
+  @UseInterceptors(FileInterceptor('file', {
+    storage: diskStorage({
+      destination: './temp-uploads',
+      filename: (req, file, cb) => {
+        const fileId = uuidv4();
+        const extension = path.extname(file.originalname);
+        cb(null, `${fileId}${extension}`);
+      },
+    }),
+    limits: {
+      fileSize: 50 * 1024 * 1024, // 50MB limit
+    },
+  }))
+  async uploadFile(@UploadedFile() file): Promise<FileUploadResponseDto> {
+    if (!file) {
+      throw new BadRequestException('No file uploaded');
+      return;
+    }
+
+    return {
+      fileId: path.parse(file.filename).name, // Return UUID without extension
+    };
+  }
 
   @Post('analyze')
   async analyze(@Body() analyzeRequest: AnalyzeRequestDto) {
     try {
+      // Read the file content from the temp uploads directory
+      const filePath = path.join(this.uploadDir, analyzeRequest.fileId);
+      
+      if (!fs.existsSync(filePath)) {
+        throw new HttpException('File not found. Please upload the file again.', HttpStatus.NOT_FOUND);
+      }
+      const fileContent = await fs.promises.readFile(filePath, 'utf8');
+
+      // Clean up the temporary file after reading
+      try {
+        await fs.promises.unlink(filePath);
+      } catch (error) {
+        this.logger.warn(`Failed to delete temporary file ${filePath}: ${error}`);
+      }
       return await this.analyzerService.analyze(
-        analyzeRequest.fileContent,
+        fileContent,
+        analyzeRequest.fileName,
         analyzeRequest.workloadId,
         analyzeRequest.selectedPillars,
         analyzeRequest.fileType
@@ -35,7 +89,7 @@ export class AnalyzerController {
 
   @Post('generate-iac')
   async generateIacDocument(@Body() body: {
-    fileContent: string;
+    fileId: string;
     fileName: string;
     fileType: string;
     recommendations: any[];
@@ -43,7 +97,7 @@ export class AnalyzerController {
   }) {
     try {
       const result = await this.analyzerService.generateIacDocument(
-        body.fileContent,
+        body.fileId,
         body.fileName,
         body.fileType,
         body.recommendations,

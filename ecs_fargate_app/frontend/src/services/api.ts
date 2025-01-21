@@ -1,5 +1,5 @@
 import axios, { AxiosError } from 'axios';
-import { AnalysisResult, RiskSummary, UploadedFile, IaCTemplateType } from '../types';
+import { AnalysisResult, RiskSummary, IaCTemplateType } from '../types';
 
 const api = axios.create({
   baseURL: '/api',
@@ -23,16 +23,34 @@ const handleError = (error: unknown) => {
 };
 
 export const analyzerApi = {
+  async uploadFile(file: File): Promise<string> {
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+      
+      const response = await api.post('/analyzer/upload', formData, {
+        headers: {
+          'Content-Type': 'multipart/form-data',
+        },
+      });
+      
+      return response.data.fileId;
+    } catch (error) {
+      throw handleError(error);
+    }
+  },
   async analyze(
-    file: UploadedFile,
+    fileId: string,
+    fileName: string,
+    fileType: string,
     workloadId: string,
     selectedPillars: string[]
   ): Promise<{ results: AnalysisResult[]; isCancelled: boolean; error?: string }> {
     try {
       const response = await api.post('/analyzer/analyze', {
-        fileContent: file.content,
-        fileName: file.name,
-        fileType: file.type,
+        fileId,
+        fileName,
+        fileType,
         workloadId,
         selectedPillars,
       });
